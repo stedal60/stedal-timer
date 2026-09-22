@@ -1,0 +1,518 @@
+
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Multitimer Vocale</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0a0a0a">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@700&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body{font-family:'Space Grotesk',sans-serif;background:#0a0a0a}
+  .mono{font-family:'JetBrains Mono',monospace}
+  @keyframes pulse-green{0%{box-shadow:0 0 0 0 rgba(34,197,94,0.7)}70%{box-shadow:0 0 0 30px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}
+  .pulse-green{animation:pulse-green 1.5s infinite}
+  @keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-4px)}75%{transform:translateX(4px)}}
+  .shake{animation:shake 0.3s infinite}
+</style>
+</head>
+<body class="bg-[#0a0a0a] text-white min-h-screen">
+<div id="app"></div>
+
+<script>
+const COLORS = [
+  {bg:'bg-orange-500', light:'bg-orange-400', ring:'ring-orange-500'},
+  {bg:'bg-cyan-500', light:'bg-cyan-400', ring:'ring-cyan-500'},
+  {bg:'bg-violet-500', light:'bg-violet-400', ring:'ring-violet-500'},
+  {bg:'bg-emerald-500', light:'bg-emerald-400', ring:'ring-emerald-500'},
+  {bg:'bg-pink-500', light:'bg-pink-400', ring:'ring-pink-500'},
+  {bg:'bg-yellow-400 text-black', light:'bg-yellow-300', ring:'ring-yellow-400'},
+];
+
+function parseItalianTime(text){
+  text = text.toLowerCase().replace(/timer/g,'').trim();
+  let nome = "Timer";
+  let secondi = 0;
+  
+  // Riconosci "e mezzo / e mezza" -> +30 sec se minuti, +30 min se ore
+  let hasMezzo = /mezzo|mezza/.test(text);
+  
+  // Estrai numeri
+  const regex = /(\d+)\s*(ore|ora|h|minuti|minuto|min|secondi|secondo|sec)/gi;
+  let match;
+  let foundTime = false;
+  let timeParts = [];
+  
+  while((match = regex.exec(text)) !== null){
+    foundTime = true;
+    let val = parseInt(match[1]);
+    let unit = match[2];
+    if(unit.startsWith('or') || unit==='h') secondi += val*3600;
+    else if(unit.startsWith('min')) secondi += val*60;
+    else if(unit.startsWith('sec')) secondi += val;
+    timeParts.push(match[0]);
+  }
+  
+  // Gestisci "un quarto d'ora" etc
+  if(/un quarto/.test(text)){ secondi += 15*60; foundTime=true; }
+  if(hasMezzo && secondi>0){
+    // se già abbiamo minuti, aggiungi 30 sec, se solo ore aggiungi 30 min
+    if(secondi % 3600 === 0) secondi += 1800;
+    else if(secondi < 3600) secondi += 30;
+  }
+  
+  // Nome = tutto quello che non è tempo
+  if(foundTime){
+    let nomeTmp = text;
+    timeParts.forEach(p=>{ nomeTmp = nomeTmp.replace(p,''); });
+    nomeTmp = nomeTmp.replace(/e mezzo|e mezza|un quarto|d'ora|di/gi,'').trim();
+    if(nomeTmp.length>1) nome = nomeTmp;
+  } else {
+    return null; // non ha capito tempo
+  }
+  
+  if(secondi===0) return null;
+  nome = nome.charAt(0).toUpperCase() + nome.slice(1);
+  if(nome.length>20) nome = nome.substring(0,20);
+  return {nome, secondi};
+}
+
+function formatTime(s){
+  if(s<0) s=0;
+  const h = Math.floor(s/3600);
+  const m = Math.floor((s%3600)/60);
+  const sec = s%60;
+  if(h>0) return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+  return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+}
+
+// App State
+let timers = [];
+let listening = false;
+let recognition = null;
+let transcript = "";
+let wakeLock = null;
+
+function initSpeech(){
+  const isWebView = /wv/.test(navigator.userAgent) || (window.Android && !window.chrome);
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!SR || isWebView){
+    console.log('WebView rilevata - Speech non supportato, uso manuale');
+    return null;
+  }
+  const rec = new SR();
+  rec.lang = 'it-IT';
+  rec.interimResults = true;
+  rec.continuous = false;
+  return rec;
+}
+
+function isInAPK(){
+  return /wv/.test(navigator.userAgent) || !!window.Android || !!window.Capacitor;
+}
+
+
+function startListening(){
+  if(!recognition) recognition = initSpeech();
+  if(!recognition) return;
+  transcript = "";
+  listening = true;
+  render();
+  recognition.onresult = (e)=>{
+    let interim = "";
+    for(let i=0;i<e.results.length;i++){ interim += e.results[i][0].transcript + " "; }
+    transcript = interim;
+    render();
+  };
+  recognition.onend = ()=>{
+    listening = false;
+    if(transcript){
+      const parsed = parseItalianTime(transcript);
+      if(parsed){
+        addTimer(parsed.nome, parsed.secondi);
+        speak(`Timer ${parsed.nome} avviato`);
+        // Notifica nativa se in APK
+        if(window.Capacitor && window.Capacitor.isNativePlatform()){
+          scheduleNativeNotification(parsed.nome, parsed.secondi);
+        }
+      } else {
+        speak("Non ho capito il tempo, riprova");
+      }
+    }
+    render();
+  };
+  recognition.onerror = (e)=>{
+    console.log('Mic error', e.error);
+    listening=false;
+    if(e.error==='not-allowed') transcript='Permesso microfono negato - usa i campi sotto';
+    else if(e.error==='aborted') transcript='Microfono non disponibile qui - usa i campi sotto';
+    else transcript='Errore: '+e.error;
+    render();
+  };
+  try{ recognition.start(); }catch(e){}
+}
+
+function speak(txt){
+  if('speechSynthesis' in window){
+    const u = new SpeechSynthesisUtterance(txt);
+    u.lang='it-IT'; speechSynthesis.speak(u);
+  }
+}
+
+function addTimer(nome, sec){
+  try{
+    if(window.Android && window.Android.startTimer){
+      window.Android.startTimer(Date.now(), nome, sec);
+    }
+    if(navigator.wakeLock){
+      navigator.wakeLock.request('screen').catch(()=>{});
+    }
+    // Prova anche API WebIntoApp se presente
+    if(window.WebIntoApp && window.WebIntoApp.startTimer){
+      window.WebIntoApp.startTimer(nome, sec);
+    }
+  }catch(e){}
+
+  const id = Date.now()+Math.random();
+  const color = COLORS[timers.length % COLORS.length];
+  const endTime = Date.now() + sec*1000;
+  timers.unshift({id, nome, total: sec, remaining: sec, running: true, color, finished:false, endTime: endTime});
+  saveTimers();
+  startTicker();
+  // Chiedi subito permesso notifiche per timer lunghi
+  if(Notification && Notification.permission==='default'){
+    Notification.requestPermission();
+  }
+}
+
+function saveTimers(){
+  // Salva anche in PHP session via fetch
+  fetch('save.php',{method:'POST', body: JSON.stringify(timers), headers:{'Content-Type':'application/json'}}).catch(()=>{});
+  localStorage.setItem('mt_timers', JSON.stringify(timers.map(t=>({...t, running:false}))));
+}
+
+function startTicker(){
+  if(window._ticker) return;
+  window._ticker = setInterval(()=>{
+    let changed=false;
+    const now = Date.now();
+    timers.forEach(t=>{
+      if(t.running && !t.finished){
+        if(t.endTime){
+          t.remaining = Math.max(0, (t.endTime - now)/1000);
+        }else{
+          t.remaining -= 0.1;
+        }
+        if(t.remaining<=0){
+          t.remaining=0; t.running=false; t.finished=true;
+          playAlarm(); 
+          if(Notification && Notification.permission==='granted'){
+            try{
+              if(navigator.serviceWorker && navigator.serviceWorker.ready){
+                navigator.serviceWorker.ready.then(reg=>{
+                  reg.showNotification(`⏰ ${t.nome} pronto!`, {body:`Timer scaduto - tira fuori!`, tag:'timer-'+t.id, requireInteraction:true, vibrate:[500,200,500]});
+                });
+              }else{
+                new Notification(`⏰ ${t.nome} pronto!`, {body:`Timer scaduto`, vibrate:[500,200,500]});
+              }
+            }catch(e){ console.log(e); }
+          }
+          if(navigator.vibrate) navigator.vibrate([500,200,500,200,500]);
+        }
+        changed=true;
+      }
+    });
+    if(changed) render();
+  },100);
+}
+
+function playAlarm(){
+  try{
+    const ctx = new (window.AudioContext||window.webkitAudioContext)();
+    const o = ctx.createOscillator(); const g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.frequency.value=880; g.gain.setValueAtTime(1,ctx.currentTime);
+    o.start(); g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime+1); o.stop(ctx.currentTime+1);
+  }catch(e){}
+}
+
+// Native notification for APK
+async function scheduleNativeNotification(nome, sec){
+  if(!window.Capacitor) return;
+  try{
+    const { LocalNotifications } = await import('https://cdn.jsdelivr.net/npm/@capacitor/local-notifications@6.0.0/dist/esm/index.js');
+    // In realtà nel build APK useremo plugin nativo, qui mock
+    await LocalNotifications.schedule({
+      notifications:[{id: Math.floor(Math.random()*10000), title:`⏰ ${nome} pronto!`, body:`Il tuo timer è scaduto`, schedule:{at: new Date(Date.now()+sec*1000)}, sound:null}]
+    });
+  }catch(e){ console.log("Native notif non disponibile in web", e); }
+}
+
+// Render
+function render(){
+  const app = document.getElementById('app');
+  app.innerHTML = `
+  <div class="max-w-5xl mx-auto px-4 py-8">
+    <div class="flex justify-between items-center mb-8">
+      <h1 class="text-2xl md:text-3xl font-bold tracking-tight">MULTITIMER <span class="text-zinc-500">VOCALE</span> <span class="text-xs align-super bg-white text-black px-2 py-1 rounded-full">PHP + APK READY</span></h1>
+      <div class="flex gap-2">
+        <button onclick="requestNotif()" class="text-xs border border-zinc-700 px-3 py-1 rounded-full">🔔 Abilita notifiche</button>
+        <button onclick="addDemo()" class="text-xs bg-zinc-800 px-3 py-1 rounded-full">+10s demo</button>
+      </div>
+    </div>
+
+    <div class="flex flex-col items-center mb-12">
+      ${!isInAPK() ? `
+      <button id="micBtn" onclick="toggleMic()" class="w-[220px] h-[220px] rounded-full flex flex-col items-center justify-center transition-all duration-300 select-none
+        ${listening ? 'bg-[#22c55e] pulse-green scale-105 shadow-[0_0_60px_rgba(34,197,94,0.6)]' : 'bg-[#ef4444] shadow-[0_0_40px_rgba(239,68,68,0.4)] hover:bg-[#dc2626] hover:scale-102'}">
+        <div class="text-5xl mb-3">${listening ? '🎤' : '🎙️'}</div>
+        <div class="font-bold text-xl tracking-wide">${listening ? 'IN ASCOLTO...' : 'PREMI E PARLA'}</div>
+        <div class="text-xs opacity-80 mt-1">${listening ? transcript || 'Di qualcosa...' : 'Es: timer pizza 10 minuti'}</div>
+      </button>
+      <div class="mt-4 text-zinc-500 text-xs text-center">Es: "pizza 10 minuti" • "pasta 7 minuti e mezzo"</div>
+      ` : `
+      <div class="w-full max-w-md bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 mb-2 text-center">
+        <div class="text-amber-400 font-bold text-sm">🔊 MODALITÀ APK</div>
+        <div class="text-zinc-400 text-xs mt-1">In questa app il vocale non è supportato da Android.<br>Usa i campi qui sotto - i timer suoneranno anche a schermo spento.</div>
+      </div>
+      `}
+
+      
+      <div class="mt-6 flex gap-2 w-full max-w-md">
+        <input id="manualName" placeholder="Nome (es. pizza)" class="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-sm outline-none">
+        <input id="manualMin" type="number" placeholder="Min" class="w-20 bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-3 text-sm">
+        <button onclick="addManual()" class="bg-white text-black px-5 rounded-xl font-bold">+</button>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      ${timers.map(t=>{
+        const pct = t.total>0 ? (t.remaining/t.total)*100 : 0;
+        return `
+        <div class="relative rounded-[24px] p-5 ${t.color.bg} ${t.color.bg.includes('text-black')?'text-black':'text-white'} ${t.finished?'shake ring-4 ring-white':''} shadow-xl">
+          <div class="flex justify-between items-start mb-3">
+            <div class="font-black text-lg uppercase tracking-wide">${t.nome}</div>
+            <button onclick="removeTimer(${t.id})" class="w-7 h-7 rounded-full bg-black/20 flex items-center justify-center">✕</button>
+          </div>
+          
+          <div class="mono text-5xl font-black tracking-tighter mb-3">${formatTime(Math.ceil(t.remaining))}</div>
+          
+          <div class="w-full h-2 bg-black/20 rounded-full overflow-hidden mb-4">
+            <div class="h-full bg-white/90 transition-all duration-100" style="width:${pct}%"></div>
+          </div>
+
+          <div class="grid grid-cols-4 gap-2 mb-3">
+            <button onclick="modTimer(${t.id}, -60)" class="bg-black/20 rounded-xl py-2 text-xs font-bold">-1m</button>
+            <button onclick="modTimer(${t.id}, -10)" class="bg-black/20 rounded-xl py-2 text-xs font-bold">-10s</button>
+            <button onclick="modTimer(${t.id}, 10)" class="bg-black/20 rounded-xl py-2 text-xs font-bold">+10s</button>
+            <button onclick="modTimer(${t.id}, 60)" class="bg-black/20 rounded-xl py-2 text-xs font-bold">+1m</button>
+          </div>
+
+          <div class="flex gap-2">
+            <button onclick="toggleTimer(${t.id})" class="flex-1 bg-black text-white rounded-xl py-3 font-bold text-sm">${t.running ? '⏸ STOP' : t.finished ? '🔄 RIAVVIA' : '▶ RIPRENDI'}</button>
+            <button onclick="restartTimer(${t.id})" class="bg-white/20 backdrop-blur rounded-xl px-4 py-3 font-bold">↻</button>
+          </div>
+          ${t.finished ? '<div class="mt-3 text-center font-black animate-pulse">⏰ SCADUTO!</div>' : ''}
+        </div>`;
+      }).join('')}
+    </div>
+
+    ${timers.length===0 ? '<div class="text-center text-zinc-600 mt-20">Nessun timer attivo. Premi il cerchio rosso e parla.</div>' : ''}
+  </div>`;
+
+}
+
+function toggleMic(){
+  if(listening){
+    if(recognition) recognition.stop();
+    listening=false; render();
+  } else {
+    startListening();
+  }
+}
+function toggleTimer(id){
+  const t = timers.find(x=>x.id===id);
+  if(!t) return;
+  if(t.finished){ t.remaining=t.total; t.finished=false; t.running=true; }
+  else t.running=!t.running;
+  saveTimers(); render();
+}
+function restartTimer(id){
+  const t = timers.find(x=>x.id===id);
+  if(t){ t.remaining=t.total; t.finished=false; t.running=true; saveTimers(); render(); }
+}
+function modTimer(id, delta){
+  const t = timers.find(x=>x.id===id);
+  if(t){ t.remaining=Math.max(0,t.remaining+delta); t.total=Math.max(t.total, t.remaining); saveTimers(); render(); }
+}
+function removeTimer(id){ timers=timers.filter(x=>x.id!==id); saveTimers(); render(); }
+function addDemo(){ addTimer("Demo",10); }
+function addManual(){
+  const n = document.getElementById('manualName').value || "Timer";
+  const m = parseInt(document.getElementById('manualMin').value) || 1;
+  addTimer(n, m*60);
+}
+function requestNotif(){
+  if(!('Notification' in window)){
+    alert('Questo browser non supporta le notifiche');
+    return;
+  }
+  Notification.requestPermission().then(permission=>{
+    if(permission==='granted'){
+      // Registra service worker se non già fatto
+      if('serviceWorker' in navigator){
+        navigator.serviceWorker.ready.then(reg=>{
+          reg.showNotification('🔔 Notifiche attivate!', {
+            body:'I timer suoneranno anche a schermo bloccato',
+            icon:'icon-192.png',
+            vibrate:[200,100,200]
+          });
+        }).catch(()=>{
+          // fallback se SW non pronto
+          new Notification('🔔 Notifiche attivate!', {body:'I timer suoneranno anche a schermo bloccato'});
+        });
+      }else{
+        new Notification('🔔 Notifiche attivate!', {body:'I timer suoneranno anche a schermo bloccato'});
+      }
+      // WakeLock per timer lunghi
+      if(navigator.wakeLock){
+        navigator.wakeLock.request('screen').then(l=>{wakeLock=l; console.log('WakeLock ok')}).catch(()=>{});
+      }
+      alert('✅ Notifiche attivate! Ora blocca lo schermo e prova un timer da 10 secondi');
+    }else{
+      alert('❌ Hai bloccato le notifiche. Vai in Impostazioni Chrome -> Notifiche -> Consenti per questo sito');
+    }
+  });
+  // Per Android chiedi anche di disattivare ottimizzazione batteria
+  try{
+    if(window.Android && window.Android.requestBatteryOptim){
+      window.Android.requestBatteryOptim();
+    }
+  }catch(e){}
+}
+
+window.toggleMic=toggleMic; window.toggleTimer=toggleTimer; window.restartTimer=restartTimer; window.modTimer=modTimer; window.removeTimer=removeTimer; window.addDemo=addDemo; window.addManual=addManual; window.requestNotif=requestNotif; window.addTimer=addTimer;
+
+// Init
+(function(){
+  try{
+    const saved = localStorage.getItem('mt_timers');
+    if(saved){ timers = JSON.parse(saved); timers.forEach(t=>{t.running=false; t.finished=false;}); }
+  }catch(e){}
+  render(); startTicker();
+  if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').then(()=>console.log('SW ok')).catch(e=>console.log('SW err',e)); }
+  // Mostra stato notifiche
+  setTimeout(()=>{
+    if(Notification && Notification.permission==='granted'){ console.log('Notifiche già attive'); }
+  },1000);
+})();
+</script>
+
+<!-- PROFESSIONAL CAPACITOR BRIDGE -->
+<script type="module">
+import { SpeechRecognition } from 'https://cdn.jsdelivr.net/npm/@capacitor-community/speech-recognition@5.0.0/dist/esm/index.js';
+</script>
+<script>
+// Professional detection
+const isNative = !!window.Capacitor || !!window.Capacitor?.isNativePlatform?.() || /Capacitor/.test(navigator.userAgent);
+
+async function initProfessionalApp(){
+  if(!window.Capacitor) return;
+  try{
+    const { LocalNotifications } = await import('https://cdn.jsdelivr.net/npm/@capacitor/local-notifications@6.0.0/dist/esm/index.js');
+    window.LN = LocalNotifications;
+    
+    // Create high priority channel for timers
+    await LocalNotifications.createChannel({
+      id: 'stedal-timers',
+      name: 'Stedal Timer - Allarmi',
+      description: 'Allarmi timer che suonano anche a schermo spento',
+      importance: 5,
+      sound: 'alarm_clock',
+      vibration: true,
+      lights: true,
+      lightColor: '#ef4444'
+    });
+    
+    await LocalNotifications.requestPermissions();
+    console.log('Professional notifications ready');
+  }catch(e){ console.log('LN init', e); }
+}
+
+// Override for native platforms - use native speech if available
+if(window.Capacitor){
+  initProfessionalApp();
+}
+
+// Enhanced addTimer that works in background
+const originalAddTimer = window.addTimer;
+window.addTimer = async function(nome, sec){
+  originalAddTimer(nome, sec);
+  
+  if(window.Capacitor && window.LN){
+    try{
+      const at = new Date(Date.now() + sec*1000);
+      await window.LN.schedule({
+        notifications:[{
+          id: Math.floor(Math.random()*1000000),
+          title: `⏰ ${nome.toUpperCase()} PRONTO!`,
+          body: `Tira fuori ${nome}! Timer da ${Math.round(sec/60)} minuti scaduto.`,
+          schedule: { at: at.toISOString() },
+          sound: null,
+          smallIcon: 'ic_stat_icon_config_sample',
+          channelId: 'stedal-timers',
+          ongoing: false,
+          autoCancel: true
+        }]
+      });
+    }catch(e){ console.log('schedule err', e); }
+  }
+  
+  // Keep awake for PWA
+  if(navigator.wakeLock){
+    try{
+      const lock = await navigator.wakeLock.request('screen');
+      console.log('WakeLock active');
+    }catch(e){}
+  }
+};
+
+// Professional audio alarm that works in background
+window.playAlarm = function(){
+  try{
+    const audio = new Audio('https://actions.google.com/sounds/v1/alarms/alarm_clock.ogg');
+    audio.loop = true;
+    audio.play().catch(()=>{});
+    
+    // Vibrate pattern
+    if(navigator.vibrate) navigator.vibrate([500,200,500,200,1000,200,1000]);
+    
+    // Native notification final
+    if(window.LN){
+      window.LN.schedule({
+        notifications:[{
+          id: 999999,
+          title: '⏰ TIMER SCADUTO!',
+          body: 'Tocca per aprire Stedal Timer',
+          schedule: { at: new Date(Date.now()+100) },
+          channelId: 'stedal-timers'
+        }]
+      });
+    }
+    
+    setTimeout(()=>{
+      if(confirm('⏰ TIMER SCADUTO!\n\nVuoi fermare l\'allarme?')){
+        audio.pause();
+      }
+    }, 500);
+  }catch(e){
+    console.log('alarm err', e);
+  }
+};
+
+console.log('Stedal Professional Bridge Loaded - isNative:', isNative);
+</script>
+</body>
+</html>

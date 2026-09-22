@@ -1,0 +1,25 @@
+{
+  "appId": "com.stedal.timerpro",
+  "appName": "Stedal Timer Pro",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_icon_config_sample",
+      "iconColor": "#ef4444",
+      "sound": "alarm_clock"
+    },
+    "SpeechRecognition": {
+      "language": "it-IT"
+    },
+    "KeepAwake": {
+      "enabled": true
+    }
+  },
+  "android": {
+    "allowMixedContent": true,
+    "captureInput": true
+  }
+}
